@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  arabic-poems-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./arabic_poems_db:/app/arabic_poems_db
+    restart: unless-stopped
+
