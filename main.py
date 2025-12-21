@@ -6,37 +6,54 @@ from enum import Enum
 from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
 import chromadb
 from dotenv import load_dotenv
 
-# تحميل متغيرات البيئة من ملف .env
+# Load environment variables from .env file
 load_dotenv()
 
 # ============================================
-# إعداد التطبيق
+# Application Setup
 # ============================================
 app = FastAPI(
     title="Arabic Poems API",
-    description="API لإنشاء قصائد عربية أو الاستشهاد بقصائد من قاعدة البيانات",
+    description="API for creating Arabic poems or quoting poems from the database",
     version="1.0.0"
 )
 
-# إعداد OpenAI
-# تأكد من تعيين متغير البيئة OPENAI_API_KEY في ملف .env
+# CORS setup to allow requests from frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://tkween.pages.dev",
+        "https://tkween.co",
+        "https://www.tkween.co",
+        "http://localhost:8080",
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# OpenAI Setup
+# Make sure to set OPENAI_API_KEY in .env file
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
-    raise ValueError("يرجى تعيين OPENAI_API_KEY في ملف .env")
+    raise ValueError("Please set OPENAI_API_KEY in .env file")
 openai_client = OpenAI(api_key=api_key)
 
-# إعداد ChromaDB
+# ChromaDB Setup
 chroma_client = chromadb.PersistentClient(path="./arabic_poems_db")
 collection = chroma_client.get_or_create_collection(name="arabic_poems")
 
 
 # ============================================
-# النماذج (Models)
+# Models
 # ============================================
 class PoemChoice(str, Enum):
     CREATE = "إنشاء قصيدة"
@@ -45,224 +62,98 @@ class PoemChoice(str, Enum):
 
 class PoemRequest(BaseModel):
     choice: PoemChoice
-    topic: str
-    verses_count: int
-    meter: Optional[str] = None
-    poet: Optional[str] = None
-
-
-class VerificationResult(BaseModel):
-    is_valid: bool
-    meter_check: str
-    rhyme_check: str
-    language_check: str
-    issues: List[str] = []
-    attempts: int = 1
+    title: str                          # Poem title
+    title_details: Optional[str] = None # Additional details about the title (optional)
+    verses_count: int                   # Number of verses
+    meter: Optional[str] = None         # Poetic meter
+    poet: Optional[str] = None          # Poet name (for quoting only)
 
 
 class CreatePoemResponse(BaseModel):
+    title: str
     verses: List[str]
     meter: str
-    topic: str
-    verification: Optional[VerificationResult] = None
 
 
 class QuotePoemResponse(BaseModel):
+    title: str
     verses: List[str]
     meter: str
-    topic: str
     poet: str
     poet_era: Optional[str] = None
-    title: Optional[str] = None
+    theme: Optional[str] = None
 
 
 # ============================================
-# دوال مساعدة
+# Helper Functions
 # ============================================
 def get_embedding(text: str, model: str = "text-embedding-3-small") -> List[float]:
-    """حساب embedding لنص معين باستخدام OpenAI API"""
+    """Calculate embedding for a given text using OpenAI API"""
     text = text.replace("\n", " ")
     response = openai_client.embeddings.create(input=[text], model=model)
     return response.data[0].embedding
 
 
-def verify_poem(verses: List[str], meter: str) -> dict:
+def create_poem_with_openai(title: str, title_details: Optional[str], verses_count: int, meter: Optional[str] = None) -> dict:
     """
-    التحقق من صحة القصيدة (الوزن، القافية، اللغة)
-    يستخدم OpenAI للمراجعة
+    Create an eloquent Arabic poem using OpenAI ChatGPT-5.2
+    Optimized according to OpenAI prompt engineering guidelines
     """
-    verses_text = "\n".join(verses)
     
-    prompt = f"""أنت خبير في علم العروض والقافية العربية.
-راجع القصيدة التالية وتحقق من:
-1. صحة الوزن على بحر {meter}
-2. اتساق القافية في جميع الأبيات
-3. سلامة اللغة العربية الفصحى
+    # Build inputs in structured format
+    meter_text = meter if meter else "اختر الأنسب (الطويل/البسيط/الكامل/الوافر/الخفيف)"
+    details_text = f"\nالتفاصيل: {title_details}" if title_details else ""
+    
+    # Concise and clear system message (OpenAI Best Practice)
+    system_message = """أنت شاعر عربي فصيح متخصص في الشعر العمودي الموزون.
+التزم دائماً بـ: الوزن العروضي الصحيح، القافية الموحدة، اللغة الفصيحة السليمة.
+أجب بـ JSON فقط."""
 
-القصيدة:
-{verses_text}
+    # Structured user prompt
+    prompt = f"""ألّف قصيدة عربية:
 
-أرجع التقييم بصيغة JSON فقط:
+العنوان: {title}{details_text}
+الأبيات: {verses_count}
+البحر: {meter_text}
+
+المتطلبات:
+• كل بيت = صدر + "    " + عجز
+• قافية موحدة (حرف روي ثابت)
+• لغة فصيحة واضحة المعنى
+• لا تستخدم أي ألفاظ غريبة أو مبهمة
+• لا تضع حركات في الأبيات إلا المهم منها لوضوح المعنى
+
+مثال للشكل:
+"قِفا نَبك من ذكرى حبيبٍ ومنزلِ    بِسِقطِ اللِوى بين الدَخولِ فَحَومَلِ"
+
 {{
-    "is_valid": true/false,
-    "meter_check": "✅ موزونة على {meter}" أو "❌ كسر في الوزن",
-    "rhyme_check": "✅ القافية موحدة" أو "❌ اختلاف في القافية",
-    "language_check": "✅ لغة فصيحة سليمة" أو "❌ أخطاء لغوية",
-    "issues": ["قائمة بالمشاكل المحددة إن وجدت"],
-    "suggestions": ["اقتراحات للتصحيح إن وجدت"]
+  "title": "{title}",
+  "verses": ["البيت الأول...", "البيت الثاني..."],
+  "meter": "اسم البحر"
 }}"""
 
     response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-5.2",
         messages=[
-            {"role": "system", "content": "أنت خبير في علم العروض والقافية. ترد بصيغة JSON فقط."},
+            {"role": "system", "content": system_message},
             {"role": "user", "content": prompt}
         ],
-        temperature=0.3,
+        temperature=0.6,  # Lower = more accurate (OpenAI recommendation)
         response_format={"type": "json_object"}
     )
     
-    return json.loads(response.choices[0].message.content)
-
-
-def fix_poem(verses: List[str], meter: str, issues: List[str]) -> dict:
-    """
-    تصحيح القصيدة بناءً على المشاكل المحددة
-    """
-    verses_text = "\n".join(verses)
-    issues_text = "\n".join(f"- {issue}" for issue in issues)
+    result = json.loads(response.choices[0].message.content)
     
-    prompt = f"""أنت شاعر عربي فصيح متمكن من العروض والقافية.
-صحح القصيدة التالية مع الحفاظ على المعنى قدر الإمكان.
-
-القصيدة الأصلية:
-{verses_text}
-
-البحر المطلوب: {meter}
-
-المشاكل المطلوب تصحيحها:
-{issues_text}
-
-أرجع القصيدة المصححة بصيغة JSON:
-{{
-    "verses": ["البيت الأول المصحح", "البيت الثاني المصحح", ...],
-    "meter": "{meter}",
-    "changes_made": ["قائمة بالتغييرات التي تمت"]
-}}"""
-
-    response = openai_client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "أنت شاعر عربي فصيح متخصص في تصحيح الشعر. ترد بصيغة JSON فقط."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.7,
-        response_format={"type": "json_object"}
-    )
-    
-    return json.loads(response.choices[0].message.content)
-
-
-def generate_poem_raw(topic: str, verses_count: int, meter: Optional[str] = None) -> dict:
-    """إنشاء قصيدة خام باستخدام OpenAI (بدون مراجعة)"""
-    
-    meter_instruction = f"- البحر: {meter}" if meter else "- البحر: اختر البحر المناسب للموضوع"
-    
-    prompt = f"""أنت شاعر عربي فصيح متمكن من الشعر العربي الفصيح وأوزانه وبحوره.
-أنشئ قصيدة عربية فصيحة بالمواصفات التالية:
-- الموضوع: {topic}
-- عدد الأبيات: {verses_count}
-{meter_instruction}
-
-يجب أن تكون القصيدة:
-1. موزونة على البحر المحدد
-2. ذات قافية موحدة
-3. بلغة عربية فصيحة جميلة
-
-أرجع الرد بصيغة JSON فقط بالشكل التالي:
-{{
-    "verses": ["البيت الأول", "البيت الثاني", ...],
-    "meter": "اسم البحر",
-    "topic": "موضوع القصيدة"
-}}
-
-لا تضف أي نص آخر خارج JSON."""
-
-    response = openai_client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "أنت شاعر عربي فصيح. ترد دائماً بصيغة JSON فقط."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.9,
-        response_format={"type": "json_object"}
-    )
-    
-    return json.loads(response.choices[0].message.content)
-
-
-def create_poem_with_openai(topic: str, verses_count: int, meter: Optional[str] = None, max_attempts: int = 3) -> dict:
-    """
-    إنشاء قصيدة جديدة مع مراجعة وتصحيح
-    
-    - يولّد القصيدة
-    - يراجعها للتحقق من الوزن والقافية
-    - يصححها إذا لزم الأمر (حتى max_attempts محاولات)
-    """
-    
-    attempt = 1
-    verification_result = None
-    
-    while attempt <= max_attempts:
-        # توليد القصيدة
-        if attempt == 1:
-            result = generate_poem_raw(topic, verses_count, meter)
-        else:
-            # في المحاولات اللاحقة، نحاول تصحيح القصيدة
-            if verification_result and verification_result.get("issues"):
-                fixed = fix_poem(
-                    verses=result["verses"],
-                    meter=result["meter"],
-                    issues=verification_result.get("issues", [])
-                )
-                result["verses"] = fixed.get("verses", result["verses"])
-            else:
-                # إعادة التوليد من جديد
-                result = generate_poem_raw(topic, verses_count, meter)
-        
-        # مراجعة القصيدة
-        verification_result = verify_poem(result["verses"], result["meter"])
-        
-        # إذا كانت صحيحة، نرجعها
-        if verification_result.get("is_valid", False):
-            result["verification"] = {
-                "is_valid": True,
-                "meter_check": verification_result.get("meter_check", "✅ موزونة"),
-                "rhyme_check": verification_result.get("rhyme_check", "✅ القافية موحدة"),
-                "language_check": verification_result.get("language_check", "✅ لغة سليمة"),
-                "issues": [],
-                "attempts": attempt
-            }
-            return result
-        
-        attempt += 1
-    
-    # إذا فشلت كل المحاولات، نرجع آخر نتيجة مع معلومات المراجعة
-    result["verification"] = {
-        "is_valid": False,
-        "meter_check": verification_result.get("meter_check", "⚠️ قد يكون هناك كسر"),
-        "rhyme_check": verification_result.get("rhyme_check", "⚠️ تحقق من القافية"),
-        "language_check": verification_result.get("language_check", "✅ لغة مقبولة"),
-        "issues": verification_result.get("issues", []),
-        "attempts": max_attempts
+    return {
+        "title": result.get("title", title),
+        "verses": result.get("verses", []),
+        "meter": result.get("meter", "غير محدد")
     }
-    
-    return result
 
 
 def get_poet_poems_cached(poet_name: str, limit: int = 200) -> dict:
-    """جلب قصائد شاعر محدد من قاعدة البيانات"""
-    # البحث في قاعدة البيانات على دفعات للعثور على الشاعر
+    """Fetch poems by a specific poet from the database"""
+    # Search database in batches to find the poet
     batch_size = 10000
     offset = 0
     poet_poems = {"ids": [], "documents": [], "metadatas": [], "embeddings": []}
@@ -287,25 +178,25 @@ def get_poet_poems_cached(poet_name: str, limit: int = 200) -> dict:
         
         offset += batch_size
         
-        # إذا وجدنا قصائد كافية، نتوقف
+        # If we found enough poems, stop
         if len(poet_poems["ids"]) >= limit:
             break
     
     return poet_poems
 
 
-def search_poems_in_chromadb(topic: str, verses_count: int, meter: Optional[str] = None, poet: Optional[str] = None) -> dict:
-    """البحث عن قصائد في ChromaDB"""
+def search_poems_in_chromadb(title: str, verses_count: int, meter: Optional[str] = None, poet: Optional[str] = None) -> dict:
+    """Search for poems in ChromaDB using semantic search"""
     
-    # إذا تم تحديد شاعر، نبحث في قصائده ثم نرتبها حسب الموضوع
+    # If a poet is specified, search their poems and rank by topic
     if poet:
         poet_results = get_poet_poems_cached(poet, limit=200)
         
         if poet_results["documents"]:
-            # حساب الـ embedding للموضوع
-            query_embedding = get_embedding(topic)
+            # Calculate embedding for the title
+            query_embedding = get_embedding(title)
             
-            # حساب التشابه يدوياً وترتيب النتائج
+            # Calculate similarity manually and sort results
             similarities = []
             for i, emb in enumerate(poet_results["embeddings"]):
                 if emb is not None and len(emb) > 0:
@@ -313,46 +204,46 @@ def search_poems_in_chromadb(topic: str, verses_count: int, meter: Optional[str]
                     similarities.append((i, sim))
             
             if similarities:
-                # ترتيب حسب التشابه
+                # Sort by similarity
                 similarities.sort(key=lambda x: x[1], reverse=True)
                 
                 for idx, sim in similarities:
                     metadata = poet_results["metadatas"][idx]
                     
-                    # تحقق من البحر إذا محدد
+                    # Check meter if specified
                     if meter and meter not in metadata.get("poem_meter", ""):
                         continue
                     
                     document = poet_results["documents"][idx]
                     all_verses = [v.strip() for v in document.split("\n") if v.strip()]
                     return {
+                        "title": metadata.get("poem_title", title),
                         "verses": all_verses[:verses_count],
                         "meter": metadata.get("poem_meter", "غير محدد"),
-                        "topic": metadata.get("poem_theme", topic),
                         "poet": metadata.get("poet_name", "غير معروف"),
                         "poet_era": metadata.get("poet_era", ""),
-                        "title": metadata.get("poem_title", "")
+                        "theme": metadata.get("poem_theme", "")
                     }
             
-            # إذا لم نجد مع فلتر البحر، نرجع أي قصيدة للشاعر
+            # If no match with meter filter, return any poem by the poet
             if poet_results["documents"]:
                 idx = random.randint(0, len(poet_results["documents"]) - 1)
                 metadata = poet_results["metadatas"][idx]
                 document = poet_results["documents"][idx]
                 all_verses = [v.strip() for v in document.split("\n") if v.strip()]
                 return {
+                    "title": metadata.get("poem_title", title),
                     "verses": all_verses[:verses_count],
                     "meter": metadata.get("poem_meter", "غير محدد"),
-                    "topic": metadata.get("poem_theme", topic),
                     "poet": metadata.get("poet_name", "غير معروف"),
                     "poet_era": metadata.get("poet_era", ""),
-                    "title": metadata.get("poem_title", "")
+                    "theme": metadata.get("poem_theme", "")
                 }
     
-    # البحث العادي بالـ embedding
-    query_embedding = get_embedding(topic)
+    # Regular search using embedding
+    query_embedding = get_embedding(title)
     
-    # جلب نتائج كثيرة للفلترة
+    # Fetch many results for filtering
     n_results = 500 if meter else 100
     results = collection.query(
         query_embeddings=[query_embedding],
@@ -360,59 +251,59 @@ def search_poems_in_chromadb(topic: str, verses_count: int, meter: Optional[str]
     )
     
     if not results["documents"] or not results["documents"][0]:
-        raise HTTPException(status_code=404, detail="لم يتم العثور على قصائد مطابقة")
+        raise HTTPException(status_code=404, detail="No matching poems found")
     
-    # جمع كل النتائج المطابقة
+    # Collect all matching results
     matching_results = []
     
     for i, metadata in enumerate(results["metadatas"][0]):
         poem_meter = metadata.get("poem_meter", "")
         
-        # تحقق من البحر إذا محدد
+        # Check meter if specified
         if meter:
             if meter not in poem_meter:
                 continue
         
-        # نتيجة مطابقة - نضيفها للقائمة
+        # Matching result - add to list
         matching_results.append(i)
     
-    # اختيار نتيجة عشوائية من النتائج المطابقة
+    # Choose a random result from matching results
     if matching_results:
         chosen_idx = random.choice(matching_results)
         document = results["documents"][0][chosen_idx]
         metadata = results["metadatas"][0][chosen_idx]
         all_verses = [v.strip() for v in document.split("\n") if v.strip()]
         return {
+            "title": metadata.get("poem_title", title),
             "verses": all_verses[:verses_count],
             "meter": metadata.get("poem_meter", "غير محدد"),
-            "topic": metadata.get("poem_theme", topic),
             "poet": metadata.get("poet_name", "غير معروف"),
             "poet_era": metadata.get("poet_era", ""),
-            "title": metadata.get("poem_title", "")
+            "theme": metadata.get("poem_theme", "")
         }
     
-    # ما لقينا، نرجع نتيجة عشوائية من أول 10
+    # No match found, return random result from first 10
     chosen_idx = random.randint(0, min(9, len(results["documents"][0]) - 1))
     document = results["documents"][0][chosen_idx]
     metadata = results["metadatas"][0][chosen_idx]
     all_verses = [v.strip() for v in document.split("\n") if v.strip()]
     
     return {
+        "title": metadata.get("poem_title", title),
         "verses": all_verses[:verses_count],
         "meter": metadata.get("poem_meter", "غير محدد"),
-        "topic": metadata.get("poem_theme", topic),
         "poet": metadata.get("poet_name", "غير معروف"),
         "poet_era": metadata.get("poet_era", ""),
-        "title": metadata.get("poem_title", "")
+        "theme": metadata.get("poem_theme", "")
     }
 
 
 # ============================================
-# الـ Endpoints
+# Endpoints
 # ============================================
 @app.get("/")
 async def root():
-    """الصفحة الرئيسية"""
+    """Home page"""
     return {
         "message": "مرحباً بك في API القصائد العربية",
         "endpoints": {
@@ -424,83 +315,75 @@ async def root():
 @app.post("/poems")
 async def handle_poem_request(request: PoemRequest):
     """
-    معالجة طلبات القصائد
+    Handle poem requests
     
-    - إنشاء قصيدة: يستخدم OpenAI لتوليد قصيدة جديدة
-    - استشهاد بقصيدة: يبحث في قاعدة البيانات عن قصائد مشابهة
+    - Create poem: Uses OpenAI to generate a new poem
+    - Quote poem: Searches the database for similar poems
+    
+    Required fields:
+    - title: Poem title
+    - title_details: Additional details (optional)
+    - verses_count: Number of verses
+    - meter: Poetic meter (optional)
+    - poet: Poet name (for quoting only)
     """
     
     if request.choice == PoemChoice.CREATE:
-        # إنشاء قصيدة جديدة باستخدام OpenAI مع المراجعة
+        # Create a new poem using OpenAI
         try:
             result = create_poem_with_openai(
-                topic=request.topic,
+                title=request.title,
+                title_details=request.title_details,
                 verses_count=request.verses_count,
-                meter=request.meter,
-                max_attempts=3
+                meter=request.meter
             )
-            
-            # تحويل معلومات التحقق للنموذج
-            verification = None
-            if result.get("verification"):
-                v = result["verification"]
-                verification = VerificationResult(
-                    is_valid=v.get("is_valid", False),
-                    meter_check=v.get("meter_check", ""),
-                    rhyme_check=v.get("rhyme_check", ""),
-                    language_check=v.get("language_check", ""),
-                    issues=v.get("issues", []),
-                    attempts=v.get("attempts", 1)
-                )
             
             return CreatePoemResponse(
+                title=result["title"],
                 verses=result["verses"],
-                meter=result["meter"],
-                topic=result["topic"],
-                verification=verification
+                meter=result["meter"]
             )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"خطأ في إنشاء القصيدة: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error creating poem: {str(e)}")
     
     elif request.choice == PoemChoice.QUOTE:
-        # البحث عن قصيدة في ChromaDB
+        # Search for a poem in ChromaDB
         try:
             result = search_poems_in_chromadb(
-                topic=request.topic,
+                title=request.title,
                 verses_count=request.verses_count,
                 meter=request.meter,
                 poet=request.poet
             )
             return QuotePoemResponse(
+                title=result["title"],
                 verses=result["verses"],
                 meter=result["meter"],
-                topic=result["topic"],
                 poet=result["poet"],
                 poet_era=result.get("poet_era"),
-                title=result.get("title")
+                theme=result.get("theme")
             )
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"خطأ في البحث: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error searching: {str(e)}")
 
 
 @app.get("/stats")
 async def get_stats():
-    """إحصائيات قاعدة البيانات"""
+    """Database statistics"""
     total = collection.count()
     return {
         "total_poems": total,
         "database_path": "./arabic_poems_db",
         "dataset_source": "arbml/ashaar (Hugging Face)",
-        "features": ["البحث الدلالي", "فلترة حسب الشاعر", "فلترة حسب البحر"]
+        "features": ["Semantic search", "Filter by poet", "Filter by meter"]
     }
 
 
 # ============================================
-# تشغيل السيرفر
+# Run Server
 # ============================================
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

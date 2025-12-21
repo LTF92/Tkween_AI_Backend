@@ -26,6 +26,11 @@ venv/
 
 # Database (too large for GitHub)
 arabic_poems_db/
+arabic_poems_db.tar.gz
+*.tar.gz
+
+# PDFs
+*.pdf
 
 # OS
 .DS_Store
