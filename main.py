@@ -95,10 +95,10 @@ def get_embedding(text: str, model: str = "text-embedding-3-small") -> List[floa
     return response.data[0].embedding
 
 
-def retrieve_similar_poems(title: str, title_details: Optional[str] = None, meter: Optional[str] = None, n_results: int = 3) -> List[dict]:
+def retrieve_similar_poems(title: str, title_details: Optional[str] = None, meter: Optional[str] = None, n_results: int = 10) -> List[dict]:
     """
     Retrieve similar poems from ChromaDB using semantic search (RAG Retrieval)
-    Returns poems similar to the given topic to use as context for generation
+    Returns random selection from top similar poems for variety
     """
     # Build search query from title and details
     search_query = title
@@ -108,8 +108,8 @@ def retrieve_similar_poems(title: str, title_details: Optional[str] = None, mete
     # Get embedding for the query
     query_embedding = get_embedding(search_query)
     
-    # Search ChromaDB - fetch more results if filtering by meter
-    fetch_count = n_results * 10 if meter else n_results * 3
+    # Fetch many results to select randomly from (top 50-100 similar poems)
+    fetch_count = 100 if meter else 50
     
     results = collection.query(
         query_embeddings=[query_embedding],
@@ -120,8 +120,8 @@ def retrieve_similar_poems(title: str, title_details: Optional[str] = None, mete
     if not results["documents"] or not results["documents"][0]:
         return []
     
-    # Filter and collect matching poems
-    similar_poems = []
+    # Collect all matching poems first
+    all_matching_poems = []
     
     for i, metadata in enumerate(results["metadatas"][0]):
         # Filter by meter if specified
@@ -133,21 +133,22 @@ def retrieve_similar_poems(title: str, title_details: Optional[str] = None, mete
         document = results["documents"][0][i]
         verses = [v.strip() for v in document.split("\n") if v.strip()]
         
-        # Take first 4-6 verses as example (enough to show style without too many tokens)
-        example_verses = verses[:min(6, len(verses))]
+        # Take first 3 verses only (to keep token count reasonable with 10 poems)
+        example_verses = verses[:min(3, len(verses))]
         
-        similar_poems.append({
+        all_matching_poems.append({
             "poet": metadata.get("poet_name", "غير معروف"),
             "title": metadata.get("poem_title", ""),
             "meter": metadata.get("poem_meter", ""),
             "era": metadata.get("poet_era", ""),
             "verses": example_verses
         })
-        
-        if len(similar_poems) >= n_results:
-            break
     
-    return similar_poems
+    # Randomly select n_results from all matching poems
+    if len(all_matching_poems) <= n_results:
+        return all_matching_poems
+    
+    return random.sample(all_matching_poems, n_results)
 
 
 def create_poem_with_openai(
@@ -174,7 +175,7 @@ def create_poem_with_openai(
             poet_info = poem.get("poet", "")
             era_info = f" ({poem.get('era', '')})" if poem.get("era") else ""
             poem_meter = poem.get("meter", "")
-            verses_text = "\n".join(poem.get("verses", [])[:4])  # Max 4 verses per example
+            verses_text = "\n".join(poem.get("verses", [])[:3])  # Max 3 verses per example (10 poems x 3 = 30 verses)
             
             examples_text.append(f"""--- مثال {i}: {poet_info}{era_info} - {poem_meter} ---
 {verses_text}""")
@@ -423,7 +424,7 @@ async def handle_poem_request(request: PoemRequest):
                 title=request.title,
                 title_details=request.title_details,
                 meter=request.meter,
-                n_results=3  # Get 3 similar poems as context
+                n_results=10  # Get 10 random similar poems as context
             )
             
             # Step 2: Generate poem with context (RAG Generation)
@@ -489,7 +490,8 @@ async def get_stats():
         "dataset_source": "arbml/ashaar (Hugging Face)",
         "rag_enabled": True,
         "rag_config": {
-            "retrieval_count": 3,
+            "retrieval_count": 10,
+            "selection_method": "random from top 50-100",
             "embedding_model": "text-embedding-3-small",
             "generation_model": "gpt-5.2"
         },
