@@ -57,7 +57,7 @@ collection = chroma_client.get_or_create_collection(name="arabic_poems")
 # ============================================
 class PoemChoice(str, Enum):
     CREATE = "إنشاء قصيدة"
-    QUOTE = "استشهاد بقصيدة"
+#    QUOTE = "استشهاد بقصيدة"
 
 
 class PoemRequest(BaseModel):
@@ -73,6 +73,7 @@ class CreatePoemResponse(BaseModel):
     title: str
     verses: List[str]
     meter: str
+    inspirations: Optional[List[dict]] = None  # Poems used as inspiration (RAG)
 
 
 class QuotePoemResponse(BaseModel):
@@ -94,37 +95,116 @@ def get_embedding(text: str, model: str = "text-embedding-3-small") -> List[floa
     return response.data[0].embedding
 
 
-def create_poem_with_openai(title: str, title_details: Optional[str], verses_count: int, meter: Optional[str] = None) -> dict:
+def retrieve_similar_poems(title: str, title_details: Optional[str] = None, meter: Optional[str] = None, n_results: int = 3) -> List[dict]:
     """
-    Create an eloquent Arabic poem using OpenAI ChatGPT-5.2
-    Optimized according to OpenAI prompt engineering guidelines
+    Retrieve similar poems from ChromaDB using semantic search (RAG Retrieval)
+    Returns poems similar to the given topic to use as context for generation
+    """
+    # Build search query from title and details
+    search_query = title
+    if title_details:
+        search_query = f"{title} - {title_details}"
+    
+    # Get embedding for the query
+    query_embedding = get_embedding(search_query)
+    
+    # Search ChromaDB - fetch more results if filtering by meter
+    fetch_count = n_results * 10 if meter else n_results * 3
+    
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=fetch_count,
+        include=["documents", "metadatas"]
+    )
+    
+    if not results["documents"] or not results["documents"][0]:
+        return []
+    
+    # Filter and collect matching poems
+    similar_poems = []
+    
+    for i, metadata in enumerate(results["metadatas"][0]):
+        # Filter by meter if specified
+        if meter:
+            poem_meter = metadata.get("poem_meter", "")
+            if meter not in poem_meter:
+                continue
+        
+        document = results["documents"][0][i]
+        verses = [v.strip() for v in document.split("\n") if v.strip()]
+        
+        # Take first 4-6 verses as example (enough to show style without too many tokens)
+        example_verses = verses[:min(6, len(verses))]
+        
+        similar_poems.append({
+            "poet": metadata.get("poet_name", "غير معروف"),
+            "title": metadata.get("poem_title", ""),
+            "meter": metadata.get("poem_meter", ""),
+            "era": metadata.get("poet_era", ""),
+            "verses": example_verses
+        })
+        
+        if len(similar_poems) >= n_results:
+            break
+    
+    return similar_poems
+
+
+def create_poem_with_openai(
+    title: str, 
+    title_details: Optional[str], 
+    verses_count: int, 
+    meter: Optional[str] = None,
+    similar_poems: Optional[List[dict]] = None
+) -> dict:
+    """
+    Create an eloquent Arabic poem using OpenAI ChatGPT-5.2 with RAG
+    Uses similar poems from the database as context for better generation
     """
     
     # Build inputs in structured format
     meter_text = meter if meter else "اختر الأنسب (الطويل/البسيط/الكامل/الوافر/الخفيف)"
     details_text = f"\nالتفاصيل: {title_details}" if title_details else ""
     
-    # Concise and clear system message (OpenAI Best Practice)
+    # Build examples section from RAG results
+    examples_section = ""
+    if similar_poems and len(similar_poems) > 0:
+        examples_text = []
+        for i, poem in enumerate(similar_poems, 1):
+            poet_info = poem.get("poet", "")
+            era_info = f" ({poem.get('era', '')})" if poem.get("era") else ""
+            poem_meter = poem.get("meter", "")
+            verses_text = "\n".join(poem.get("verses", [])[:4])  # Max 4 verses per example
+            
+            examples_text.append(f"""--- مثال {i}: {poet_info}{era_info} - {poem_meter} ---
+{verses_text}""")
+        
+        examples_section = f"""
+قصائد مشابهة للاستلهام (لا تنسخها، استلهم منها الأسلوب والوزن فقط):
+
+{chr(10).join(examples_text)}
+
+"""
+    
+    # Enhanced system message with RAG context
     system_message = """أنت شاعر عربي فصيح متخصص في الشعر العمودي الموزون.
+مهمتك: أنشئ قصيدة أصيلة جديدة مستلهماً من أساليب الشعراء الكبار.
 التزم دائماً بـ: الوزن العروضي الصحيح، القافية الموحدة، اللغة الفصيحة السليمة.
 أجب بـ JSON فقط."""
 
-    # Structured user prompt
+    # Structured user prompt with RAG examples
     prompt = f"""ألّف قصيدة عربية:
 
 العنوان: {title}{details_text}
 الأبيات: {verses_count}
 البحر: {meter_text}
-
+{examples_section}
 المتطلبات:
 • كل بيت = صدر + "    " + عجز
 • قافية موحدة (حرف روي ثابت)
-• لغة فصيحة واضحة المعنى
-• لا تستخدم أي ألفاظ غريبة أو مبهمة
-• لا تضع حركات في الأبيات إلا المهم منها لوضوح المعنى
-
-مثال للشكل:
-"قِفا نَبك من ذكرى حبيبٍ ومنزلِ    بِسِقطِ اللِوى بين الدَخولِ فَحَومَلِ"
+• لغة فصيحة واضحة المعنى كلغة الشعراء في الأمثلة
+• استلهم الأسلوب من الأمثلة لكن أنشئ أبياتاً جديدة تماماً
+• لا تضع حركات إلا المهم منها لوضوح المعنى
 
 {{
   "title": "{title}",
@@ -306,8 +386,10 @@ async def root():
     """Home page"""
     return {
         "message": "مرحباً بك في API القصائد العربية",
+        "description": "RAG-powered Arabic Poetry Generation API",
         "endpoints": {
-            "POST /poems": "إنشاء قصيدة أو استشهاد بقصيدة"
+            "POST /poems": "إنشاء قصيدة باستخدام RAG",
+            "GET /stats": "إحصائيات قاعدة البيانات"
         }
     }
 
@@ -315,33 +397,61 @@ async def root():
 @app.post("/poems")
 async def handle_poem_request(request: PoemRequest):
     """
-    Handle poem requests
+    Handle poem requests using RAG (Retrieval-Augmented Generation)
     
-    - Create poem: Uses OpenAI to generate a new poem
-    - Quote poem: Searches the database for similar poems
+    How it works:
+    1. Retrieves similar poems from ChromaDB based on title/topic
+    2. Uses retrieved poems as context for OpenAI generation
+    3. Generates a new poem inspired by classical Arabic poetry
     
     Required fields:
-    - title: Poem title
+    - title: Poem title/topic
     - title_details: Additional details (optional)
     - verses_count: Number of verses
-    - meter: Poetic meter (optional)
-    - poet: Poet name (for quoting only)
+    - meter: Poetic meter (optional, helps find similar poems in same meter)
+    
+    Response includes:
+    - Generated poem (title, verses, meter)
+    - inspirations: List of poets/eras used as context
     """
     
     if request.choice == PoemChoice.CREATE:
-        # Create a new poem using OpenAI
+        # Create a new poem using OpenAI with RAG
         try:
+            # Step 1: Retrieve similar poems from ChromaDB (RAG Retrieval)
+            similar_poems = retrieve_similar_poems(
+                title=request.title,
+                title_details=request.title_details,
+                meter=request.meter,
+                n_results=3  # Get 3 similar poems as context
+            )
+            
+            # Step 2: Generate poem with context (RAG Generation)
             result = create_poem_with_openai(
                 title=request.title,
                 title_details=request.title_details,
                 verses_count=request.verses_count,
-                meter=request.meter
+                meter=request.meter,
+                similar_poems=similar_poems
             )
+            
+            # Prepare inspiration info for response
+            inspirations = None
+            if similar_poems:
+                inspirations = [
+                    {
+                        "poet": p.get("poet", ""),
+                        "era": p.get("era", ""),
+                        "meter": p.get("meter", "")
+                    }
+                    for p in similar_poems
+                ]
             
             return CreatePoemResponse(
                 title=result["title"],
                 verses=result["verses"],
-                meter=result["meter"]
+                meter=result["meter"],
+                inspirations=inspirations
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error creating poem: {str(e)}")
@@ -371,13 +481,24 @@ async def handle_poem_request(request: PoemRequest):
 
 @app.get("/stats")
 async def get_stats():
-    """Database statistics"""
+    """Database and RAG statistics"""
     total = collection.count()
     return {
         "total_poems": total,
         "database_path": "./arabic_poems_db",
         "dataset_source": "arbml/ashaar (Hugging Face)",
-        "features": ["Semantic search", "Filter by poet", "Filter by meter"]
+        "rag_enabled": True,
+        "rag_config": {
+            "retrieval_count": 3,
+            "embedding_model": "text-embedding-3-small",
+            "generation_model": "gpt-5.2"
+        },
+        "features": [
+            "RAG-enhanced poem generation",
+            "Semantic similarity search",
+            "Filter by meter",
+            "Classical poetry inspiration"
+        ]
     }
 
 
