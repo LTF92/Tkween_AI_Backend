@@ -23,6 +23,7 @@ venv/
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+!Poems_prep.ipynb
 
 # Database (too large for GitHub)
 arabic_poems_db/
